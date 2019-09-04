@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
-	"os"
 	"strings"
 	"time"
 
@@ -59,27 +58,10 @@ func ValidateConfig(config kritisv1beta1.GrafeasConfigSpec) error {
 	if strings.HasPrefix(config.Addr, "/") { // Unix socket address
 		return nil
 	}
-	if config.CAPath == "" {
-		return fmt.Errorf("certificate authority must be specified")
-	}
-	if config.ClientCertPath == "" {
-		return fmt.Errorf("client cert path must be specified")
-	}
-	if config.ClientKeyPath == "" {
-		return fmt.Errorf("client key path must be specified")
-	}
-	for _, path := range []string{config.CAPath, config.ClientCertPath, config.ClientKeyPath} {
-		if _, err := os.Stat(path); err != nil {
-			if os.IsNotExist(err) {
-				return fmt.Errorf("certificate path %s does not exist", path)
-			}
-			return err
-		}
-	}
 	return nil
 }
 
-func New(config kritisv1beta1.GrafeasConfigSpec) (*Client, error) {
+func New(config kritisv1beta1.GrafeasConfigSpec, certs *CertConfig) (*Client, error) {
 	if err := ValidateConfig(config); err != nil {
 		return nil, err
 	}
@@ -96,12 +78,12 @@ func New(config kritisv1beta1.GrafeasConfigSpec) (*Client, error) {
 			return nil, err
 		}
 	} else {
-		certificate, err := tls.LoadX509KeyPair(config.ClientCertPath, config.ClientKeyPath)
+		certificate, err := tls.LoadX509KeyPair(certs.CertFile, certs.KeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("could not load client key pair: %s", err)
 		}
 		certPool := x509.NewCertPool()
-		ca, err := ioutil.ReadFile(config.CAPath)
+		ca, err := ioutil.ReadFile(certs.CAFile)
 		if err != nil {
 			return nil, fmt.Errorf("could not read ca certificate: %s", err)
 		}
@@ -118,9 +100,6 @@ func New(config kritisv1beta1.GrafeasConfigSpec) (*Client, error) {
 			Certificates: []tls.Certificate{certificate},
 			RootCAs:      certPool,
 		})
-		if err != nil {
-			return nil, fmt.Errorf("could not load tls cert: %s", err)
-		}
 		conn, err = grpc.Dial(config.Addr, grpc.WithTransportCredentials(creds))
 		if err != nil {
 			return nil, err
@@ -130,6 +109,12 @@ func New(config kritisv1beta1.GrafeasConfigSpec) (*Client, error) {
 		client: grafeas.NewGrafeasV1Beta1Client(conn),
 		ctx:    ctx,
 	}, nil
+}
+
+// Close closes client connections
+func (c Client) Close() {
+	// Not Implemented.
+	// grafeas.GrafeasV1Beta1Client does not expose Close() method for conn.
 }
 
 // Vulnerabilities gets Package Vulnerabilities Occurrences for a specified image.
@@ -196,10 +181,7 @@ func (c Client) AttestationNote(aa *kritisv1beta1.AttestationAuthority) (*grafea
 func (c Client) CreateAttestationOccurence(note *grafeas.Note,
 	containerImage string,
 	pgpSigningKey *secrets.PGPSigningSecret) (*grafeas.Occurrence, error) {
-	fingerprint, err := util.GetAttestationKeyFingerprint(pgpSigningKey)
-	if err != nil {
-		return nil, fmt.Errorf("Can't get fingerprint from PGP siging key %s: %v", pgpSigningKey.SecretName, err)
-	}
+	fingerprint := util.GetAttestationKeyFingerprint(pgpSigningKey)
 
 	// Create Attestation Signature
 	sig, err := util.CreateAttestationSignature(containerImage, pgpSigningKey)

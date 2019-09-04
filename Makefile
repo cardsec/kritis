@@ -52,7 +52,6 @@ test: cross
 	./hack/verify-codegen.sh
 	./hack/dep.sh
 	./hack/test.sh
-	./hack/linter.sh
 
 GO_FILES := $(shell find . -type f -name '*.go' -not -path "./vendor/*")
 GO_LD_RESOLVE_FLAGS :=""
@@ -113,13 +112,13 @@ HELM_HOOKS = preinstall postinstall predelete
 $(HELM_HOOKS): $(GO_FILES)
 	GOARCH=$(GOARCH) GOOS=linux CGO_ENABLED=0 go build -ldflags "$(GO_LDFLAGS)" -o out/$@ $(REPOPATH)/helm-hooks/$@
 
-.PHONY: %-image
-%-image: $(HELM_HOOKS)
-	docker build -t $(REGISTRY)/$*:$(IMAGE_TAG) -f helm-hooks/Dockerfile . --build-arg stage=$*
-
 .PHONY: %-test-image
 %-test-image: $(HELM_HOOKS)
 	docker build -t $(TEST_REGISTRY)/$*:$(IMAGE_TAG) -f helm-hooks/Dockerfile . --build-arg stage=$*
+
+.PHONY: %-image
+%-image: $(HELM_HOOKS)
+	docker build -t $(REGISTRY)/$*:$(IMAGE_TAG) -f helm-hooks/Dockerfile . --build-arg stage=$*
 
 .PHONY: helm-release-image
 helm-release-image:
@@ -219,6 +218,7 @@ just-the-integration-test:
 		-timeout 30m \
 		-gac-credentials=$(GAC_CREDENTIALS_PATH) \
 		-gcp-project=$(GCP_PROJECT) \
+		-gke-zone=$(GCP_ZONE) \
 		-gke-cluster-name=$(GCP_CLUSTER) $(EXTRA_TEST_FLAGS)
 
 # integration-local requires that "setup-integration-local" has been run at least once.

@@ -5,6 +5,7 @@ Installing Kritis, creates a number of resources in your cluster. Here are the m
 | Resource Name | Resource Kind | Description |
 |---------------|---------------|----------------|
 | kritis-validation-hook| ValidatingWebhookConfiguration | This is Kubernetes [Validating Admission Webhook](https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers) which enforces the policies. |
+| genericattestationpolicies.kritis.grafeas.io | crd | This CRD defines the generic attestation policy kind GenericAttestationPolicy.|
 | imagesecuritypolicies.kritis.grafeas.io | crd | This CRD defines the image security policy kind ImageSecurityPolicy.|
 | attestationauthorities.kritis.grafeas.io | crd | The CRD defines the attestation authority policy kind AttestationAuthority.|
 | tls-webhook-secret | secret | Secret required for ValidatingWebhookConfiguration|
@@ -46,13 +47,13 @@ metadata:
     name: my-isp
     namespace: example-namespace
 spec:
-  imageWhitelist:
-  - gcr.io/my-project/whitelist-image@sha256:<DIGEST>
+  imageAllowlist:
+  - gcr.io/my-project/allowlist-image@sha256:<DIGEST>
   packageVulnerabilityPolicy:
     maximumSeverity: MEDIUM
-    whitelistCVEs:
-      providers/goog-vulnz/notes/CVE-2017-1000082
-      providers/goog-vulnz/notes/CVE-2017-1000082
+    allowlistCVEs:
+      - providers/goog-vulnz/notes/CVE-2017-1000082
+      - providers/goog-vulnz/notes/CVE-2017-1000081
 ```
 
 To view the CRD:
@@ -85,8 +86,8 @@ Image Security Policy Spec description:
 
 | Field     | Default (if applicable)   | Description |
 |-----------|---------------------------|-------------|
-|imageWhitelist | | List of images that are whitelisted and are not inspected by Admission Controller.|
-|packageVulnerabilityPolicy.whitelistCVEs |  | List of CVEs which will be ignored.|
+|imageAllowlist | | List of images that are allowlisted and are not inspected by Admission Controller.|
+|packageVulnerabilityPolicy.allowlistCVEs |  | List of CVEs which will be ignored.|
 |packageVulnerabilityPolicy.maximumSeverity| ALLOW_ALL | Tolerance level for vulnerabilities found in the container image.|
 |packageVulnerabilityPolicy.maximumFixUnavailableSeverity |  ALLOW_ALL | The tolerance level for vulnerabilities found that have no fix available.|
 
@@ -98,12 +99,12 @@ Here are the valid values for Policy Specs.
 |                          | MEDIUM | Allow Containers with Low and Medium vulnerabilities. |
 |                                           | HIGH  | Allow Containers with Low, Medium & High vulnerabilities. |
 |                                           | ALLOW_ALL | Allow all vulnerabilities.  |
-|                                           | BLOCK_ALL | Block all vulnerabilities except listed in whitelist. |
+|                                           | BLOCK_ALL | Block all vulnerabilities except listed in allowlist. |
 |packageVulnerabilityPolicy.maximumFixUnavailableSeverity | LOW | Only allow containers with low unpatchable vulnerabilities. |
 |                          | MEDIUM | Allow Containers with Low and Medium unpatchable vulnerabilities. |
 |                                           | HIGH  | Allow Containers with Low, Medium & High  unpatchaable vulnerabilities. |
 |                                           | ALLOW_ALL | Allow all unpatchable vulnerabilities.  |
-|                                           | BLOCK_ALL | Block all unpatchable vulnerabilities except listed in whitelist. |
+|                                           | BLOCK_ALL | Block all unpatchable vulnerabilities except listed in allowlist. |
 
 ## AttestationAuthority CRD
 

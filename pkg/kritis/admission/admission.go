@@ -27,10 +27,10 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/grafeas/kritis/cmd/kritis/version"
-	"github.com/grafeas/kritis/pkg/kritis/admission/constants"
-	kritisv1beta1 "github.com/grafeas/kritis/pkg/kritis/apis/kritis/v1beta1"
-	kritisconstants "github.com/grafeas/kritis/pkg/kritis/constants"
+	kritis "github.com/grafeas/kritis/pkg/kritis/apis/kritis/v1beta1"
+	"github.com/grafeas/kritis/pkg/kritis/constants"
 	"github.com/grafeas/kritis/pkg/kritis/crd/authority"
+	"github.com/grafeas/kritis/pkg/kritis/crd/genericattestation"
 	"github.com/grafeas/kritis/pkg/kritis/crd/securitypolicy"
 	"github.com/grafeas/kritis/pkg/kritis/metadata"
 	"github.com/grafeas/kritis/pkg/kritis/review"
@@ -38,28 +38,40 @@ import (
 	"github.com/grafeas/kritis/pkg/kritis/violation"
 	"k8s.io/api/admission/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 )
 
 type config struct {
-	retrievePod                func(r *http.Request) (*v1.Pod, v1beta1.AdmissionReview, error)
-	retrieveDeployment         func(r *http.Request) (*appsv1.Deployment, v1beta1.AdmissionReview, error)
-	fetchMetadataClient        func(config *Config) (metadata.Fetcher, error)
-	fetchImageSecurityPolicies func(namespace string) ([]kritisv1beta1.ImageSecurityPolicy, error)
-	reviewer                   func(metadata.Fetcher) reviewer
+	retrievePod                     func(r *http.Request) (*v1.Pod, v1beta1.AdmissionReview, error)
+	retrieveDeployment              func(r *http.Request) (*appsv1.Deployment, v1beta1.AdmissionReview, error)
+	fetchMetadataClient             func(config *Config) (metadata.Fetcher, error)
+	fetchGenericAttestationPolicies func(namespace string) ([]kritis.GenericAttestationPolicy, error)
+	fetchImageSecurityPolicies      func(namespace string) ([]kritis.ImageSecurityPolicy, error)
+	reviewer                        func(metadata.Fetcher) reviewer
 }
+
+// Define constants for metav1.Status.Status
+// See https://github.com/kubernetes/kubernetes/blob/release-1.1/docs/devel/api-conventions.md#response-status-kind
+type Status string
+
+const (
+	successStatus  Status = "Success"
+	failureStatus  Status = "Failure"
+	successMessage        = "Successfully admitted."
+)
 
 var (
 	// For testing
 	admissionConfig = config{
-		retrievePod:                unmarshalPod,
-		retrieveDeployment:         unmarshalDeployment,
-		fetchMetadataClient:        MetadataClient,
-		fetchImageSecurityPolicies: securitypolicy.ImageSecurityPolicies,
-		reviewer:                   getReviewer,
+		retrievePod:                     unmarshalPod,
+		retrieveDeployment:              unmarshalDeployment,
+		fetchMetadataClient:             MetadataClient,
+		fetchGenericAttestationPolicies: genericattestation.Policies,
+		fetchImageSecurityPolicies:      securitypolicy.ImageSecurityPolicies,
+		reviewer:                        getReviewer,
 	}
 
 	defaultViolationStrategy = &violation.LoggingStrategy{}
@@ -73,13 +85,14 @@ var (
 // Config is the metadata client configuration
 type Config struct {
 	Metadata string // Metadata is the name of the metadata client fetcher
-	Grafeas  kritisv1beta1.GrafeasConfigSpec
+	Grafeas  kritis.GrafeasConfigSpec
+	Certs    *grafeas.CertConfig
 }
 
 // MetadataClient returns metadata.Fetcher based on the admission control config
 func MetadataClient(config *Config) (metadata.Fetcher, error) {
 	if config.Metadata == constants.GrafeasMetadata {
-		return grafeas.New(config.Grafeas)
+		return grafeas.New(config.Grafeas, config.Certs)
 	}
 	if config.Metadata == constants.ContainerAnalysisMetadata {
 		return containeranalysis.NewCache()
@@ -154,7 +167,7 @@ func ReviewHandler(w http.ResponseWriter, r *http.Request, config *Config) {
 		resp := &v1beta1.AdmissionResponse{
 			Allowed: false,
 			Result: &metav1.Status{
-				Status:  string(constants.FailureStatus),
+				Status:  string(failureStatus),
 				Message: err.Error(),
 			},
 		}
@@ -176,8 +189,8 @@ func ReviewHandler(w http.ResponseWriter, r *http.Request, config *Config) {
 			UID:     ar.Request.UID,
 			Allowed: true,
 			Result: &metav1.Status{
-				Status:  string(constants.SuccessStatus),
-				Message: constants.SuccessMessage,
+				Status:  string(successStatus),
+				Message: successMessage,
 			},
 		},
 	}
@@ -222,7 +235,7 @@ func reviewDeployment(deployment *appsv1.Deployment, ar *v1beta1.AdmissionReview
 func createDeniedResponse(ar *v1beta1.AdmissionReview, message string) {
 	ar.Response.Allowed = false
 	ar.Response.Result = &metav1.Status{
-		Status:  string(constants.FailureStatus),
+		Status:  string(failureStatus),
 		Message: message,
 	}
 }
@@ -230,6 +243,30 @@ func createDeniedResponse(ar *v1beta1.AdmissionReview, message string) {
 func reviewImages(images []string, ns string, pod *v1.Pod, ar *v1beta1.AdmissionReview, config *Config) {
 	// NOTE: pod may be nil if we are reviewing images for a replica set.
 	glog.Infof("Reviewing images for %s in namespace %s: %s", pod, ns, images)
+	client, err := admissionConfig.fetchMetadataClient(config)
+	defer client.Close()
+
+	if err != nil {
+		errMsg := fmt.Sprintf("error getting metadata client: %v", err)
+		glog.Errorf(errMsg)
+		createDeniedResponse(ar, errMsg)
+		return
+	}
+
+	gaps, err := admissionConfig.fetchGenericAttestationPolicies(ns)
+	if err != nil {
+		errMsg := fmt.Sprintf("error getting generic attestation policies: %v", err)
+		glog.Errorf(errMsg)
+		createDeniedResponse(ar, errMsg)
+		return
+	}
+	if len(gaps) == 0 {
+		glog.Infof("No Generic Attestation Policies found in namespace %s", ns)
+	} else {
+		glog.Infof("Found %d Generic Attestation Policies", len(gaps))
+		reviewGenericAttestationPolicy(images, ns, pod, ar, client, gaps)
+	}
+
 	isps, err := admissionConfig.fetchImageSecurityPolicies(ns)
 	if err != nil {
 		errMsg := fmt.Sprintf("error getting image security policies: %v", err)
@@ -238,20 +275,24 @@ func reviewImages(images []string, ns string, pod *v1.Pod, ar *v1beta1.Admission
 		return
 	}
 	if len(isps) == 0 {
-		glog.Errorf("No ISP's found in namespace %s", ns)
+		glog.Infof("No ISPs found in namespace %s", ns)
 	} else {
 		glog.Infof("Found %d ISPs to review image against", len(isps))
+		reviewImageSecurityPolicy(images, ns, pod, ar, client, isps)
 	}
+}
 
-	client, err := admissionConfig.fetchMetadataClient(config)
-	if err != nil {
-		errMsg := fmt.Sprintf("error getting metadata client: %v", err)
-		glog.Errorf(errMsg)
-		createDeniedResponse(ar, errMsg)
-		return
+func reviewImageSecurityPolicy(images []string, ns string, pod *v1.Pod, ar *v1beta1.AdmissionReview, mc metadata.Fetcher, isps []kritis.ImageSecurityPolicy) {
+	r := admissionConfig.reviewer(mc)
+	if err := r.ReviewISP(images, isps, pod); err != nil {
+		glog.Infof("Denying %s in namespace %s: %v", pod, ns, err)
+		createDeniedResponse(ar, err.Error())
 	}
-	r := admissionConfig.reviewer(client)
-	if err := r.Review(images, isps, pod); err != nil {
+}
+
+func reviewGenericAttestationPolicy(images []string, ns string, pod *v1.Pod, ar *v1beta1.AdmissionReview, mc metadata.Fetcher, gaps []kritis.GenericAttestationPolicy) {
+	r := admissionConfig.reviewer(mc)
+	if err := r.ReviewGAP(images, gaps, pod); err != nil {
 		glog.Infof("Denying %s in namespace %s: %v", pod, ns, err)
 		createDeniedResponse(ar, err.Error())
 	}
@@ -325,7 +366,7 @@ func checkBreakglass(meta *metav1.ObjectMeta) bool {
 	if annotations == nil {
 		return false
 	}
-	_, ok := annotations[kritisconstants.Breakglass]
+	_, ok := annotations[constants.Breakglass]
 	return ok
 }
 
@@ -334,13 +375,13 @@ func getReviewer(client metadata.Fetcher) reviewer {
 		Strategy:  defaultViolationStrategy,
 		IsWebhook: true,
 		Secret:    secrets.Fetch,
-		Auths:     authority.Authorities,
+		Auths:     authority.Authority,
 		Validate:  securitypolicy.ValidateImageSecurityPolicy,
 	})
 }
 
-// reviewer interface defines an Kritis Reviewer Struct.
-// TODO: This will be removed in future refactoring.
+// reviewer interface defines Kritis Reviewer struct, useful for mocking in tests
 type reviewer interface {
-	Review(images []string, isps []kritisv1beta1.ImageSecurityPolicy, pod *v1.Pod) error
+	ReviewGAP(images []string, isps []kritis.GenericAttestationPolicy, pod *v1.Pod) error
+	ReviewISP(images []string, isps []kritis.ImageSecurityPolicy, pod *v1.Pod) error
 }

@@ -36,12 +36,16 @@ func (c *FakeKritisV1beta1) BuildPolicies(namespace string) v1beta1.BuildPolicyI
 	return &FakeBuildPolicies{c, namespace}
 }
 
+func (c *FakeKritisV1beta1) GenericAttestationPolicies(namespace string) v1beta1.GenericAttestationPolicyInterface {
+	return &FakeGenericAttestationPolicies{c, namespace}
+}
+
 func (c *FakeKritisV1beta1) ImageSecurityPolicies(namespace string) v1beta1.ImageSecurityPolicyInterface {
 	return &FakeImageSecurityPolicies{c, namespace}
 }
 
-func (c *FakeKritisV1beta1) KritisConfigs(namespace string) v1beta1.KritisConfigInterface {
-	return &FakeKritisConfigs{c, namespace}
+func (c *FakeKritisV1beta1) KritisConfigs() v1beta1.KritisConfigInterface {
+	return &FakeKritisConfigs{c}
 }
 
 // RESTClient returns a RESTClient that is used to communicate

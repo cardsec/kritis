@@ -53,9 +53,7 @@ Enable the Container Registry API:
 gcloud services enable containerregistry.googleapis.com
 ```
 
-Wait for the above API's to be fully enabled, then enable vulnerability scanning:
-
-- [Enable vulnerability scanning](https://console.cloud.google.com/gcr/settings)
+Wait for the above API's to be fully enabled, then ensure [vulnerability scanning is enabled](https://console.cloud.google.com/gcr/settings).
 
 For more documentation, see [Container Analysis Overview](https://cloud.google.com/container-registry/docs/container-analysis).
 
@@ -65,7 +63,6 @@ kritis requires a cluster running Kubernetes v1.9.2 or newer. You may create one
 
 ```shell
 gcloud components update
-gcloud config set project $PROJECT
 gcloud config set compute/zone us-central1-a
 gcloud container clusters create kritis-test --num-nodes=2
 ```
@@ -129,7 +126,7 @@ Install [helm](https://docs.helm.sh/using_helm/#installing-helm), and execute th
 ```shell
 kubectl create serviceaccount --namespace kube-system tiller
 
-kubectl create clusterrolebinding tiller-cluster-rule \
+kubectl create clusterrolebinding tiller-cluster-role \
   --clusterrole=cluster-admin \
   --serviceaccount=kube-system:tiller
 ```
@@ -207,7 +204,7 @@ The installation is complete once:
 
 ## Tutorial
 
-Once installed, follow our [tutorial](docs/tutorial.md) to learn how to test and manage Kritis.
+Once installed, follow our [tutorial](tutorial.md) to learn how to test and manage Kritis.
 
 ## Uninstalling Kritis
 

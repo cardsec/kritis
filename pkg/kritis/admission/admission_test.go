@@ -26,12 +26,12 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/grafeas/kritis/cmd/kritis/version"
-	"github.com/grafeas/kritis/pkg/kritis/admission/constants"
-	kritisv1beta1 "github.com/grafeas/kritis/pkg/kritis/apis/kritis/v1beta1"
+	kritis "github.com/grafeas/kritis/pkg/kritis/apis/kritis/v1beta1"
+	"github.com/grafeas/kritis/pkg/kritis/constants"
 	"github.com/grafeas/kritis/pkg/kritis/metadata"
 	"github.com/grafeas/kritis/pkg/kritis/testutil"
 	"k8s.io/api/admission/v1beta1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -40,7 +40,7 @@ type testConfig struct {
 	mockConfig config
 	httpStatus int
 	allowed    bool
-	status     constants.Status
+	status     Status
 	message    string
 }
 
@@ -59,8 +59,8 @@ func Test_BreakglassAnnotation(t *testing.T) {
 		mockConfig: mockConfig,
 		httpStatus: http.StatusOK,
 		allowed:    true,
-		status:     constants.SuccessStatus,
-		message:    constants.SuccessMessage,
+		status:     successStatus,
+		message:    successMessage,
 	})
 }
 
@@ -97,34 +97,40 @@ func TestReviewHandler(t *testing.T) {
 
 func Test_AdmissionResponse(t *testing.T) {
 	tcs := []struct {
-		name        string
-		reviewErr   bool
-		status      constants.Status
-		expectedMsg string
+		name         string
+		reviewGAPErr bool
+		reviewISPErr bool
+		status       Status
+		expectedMsg  string
 	}{
-		{"valid response when no review error", false, constants.SuccessStatus, constants.SuccessMessage},
-		{"valid response when review error", true, constants.FailureStatus, fmt.Sprintf("found violations in %s", testutil.QualifiedImage)},
+		{"valid response when no review error", false, false, successStatus, successMessage},
+		{"invalid response when GAP review error", true, false, failureStatus, fmt.Sprintf("found violations in %s", testutil.QualifiedImage)},
+		{"valid response when ISP review error", false, true, failureStatus, fmt.Sprintf("found violations in %s", testutil.QualifiedImage)},
 	}
-	mockISP := func(namespace string) ([]kritisv1beta1.ImageSecurityPolicy, error) {
-		return []kritisv1beta1.ImageSecurityPolicy{{Spec: kritisv1beta1.ImageSecurityPolicySpec{}}}, nil
+	mockGAP := func(namespace string) ([]kritis.GenericAttestationPolicy, error) {
+		return []kritis.GenericAttestationPolicy{{Spec: kritis.GenericAttestationPolicySpec{}}}, nil
+	}
+	mockISP := func(namespace string) ([]kritis.ImageSecurityPolicy, error) {
+		return []kritis.ImageSecurityPolicy{{Spec: kritis.ImageSecurityPolicySpec{}}}, nil
 	}
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
 			mReviewer := func(client metadata.Fetcher) reviewer {
-				return testutil.NewReviewer(tc.reviewErr, tc.expectedMsg)
+				return testutil.NewReviewer(tc.reviewGAPErr, tc.reviewISPErr, tc.expectedMsg)
 			}
 			mockConfig := config{
 				retrievePod: mockValidPod(),
 				fetchMetadataClient: func(config *Config) (metadata.Fetcher, error) {
 					return testutil.NilFetcher()()
 				},
-				fetchImageSecurityPolicies: mockISP,
-				reviewer:                   mReviewer,
+				fetchGenericAttestationPolicies: mockGAP,
+				fetchImageSecurityPolicies:      mockISP,
+				reviewer:                        mReviewer,
 			}
 			RunTest(t, testConfig{
 				mockConfig: mockConfig,
 				httpStatus: http.StatusOK,
-				allowed:    !tc.reviewErr,
+				allowed:    !tc.reviewISPErr && !tc.reviewGAPErr,
 				status:     tc.status,
 				message:    tc.expectedMsg,
 			})
@@ -194,8 +200,8 @@ func PodTestReviewHandler(w http.ResponseWriter, r *http.Request) {
 			UID:     types.UID(""),
 			Allowed: true,
 			Result: &metav1.Status{
-				Status:  string(constants.SuccessStatus),
-				Message: constants.SuccessMessage,
+				Status:  string(successStatus),
+				Message: successMessage,
 			},
 		},
 	}

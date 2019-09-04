@@ -29,6 +29,7 @@ type KritisV1beta1Interface interface {
 	RESTClient() rest.Interface
 	AttestationAuthoritiesGetter
 	BuildPoliciesGetter
+	GenericAttestationPoliciesGetter
 	ImageSecurityPoliciesGetter
 	KritisConfigsGetter
 }
@@ -46,12 +47,16 @@ func (c *KritisV1beta1Client) BuildPolicies(namespace string) BuildPolicyInterfa
 	return newBuildPolicies(c, namespace)
 }
 
+func (c *KritisV1beta1Client) GenericAttestationPolicies(namespace string) GenericAttestationPolicyInterface {
+	return newGenericAttestationPolicies(c, namespace)
+}
+
 func (c *KritisV1beta1Client) ImageSecurityPolicies(namespace string) ImageSecurityPolicyInterface {
 	return newImageSecurityPolicies(c, namespace)
 }
 
-func (c *KritisV1beta1Client) KritisConfigs(namespace string) KritisConfigInterface {
-	return newKritisConfigs(c, namespace)
+func (c *KritisV1beta1Client) KritisConfigs() KritisConfigInterface {
+	return newKritisConfigs(c)
 }
 
 // NewForConfig creates a new KritisV1beta1Client for the given config.

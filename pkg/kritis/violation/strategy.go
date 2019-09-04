@@ -22,7 +22,7 @@ import (
 	"github.com/grafeas/kritis/pkg/kritis/constants"
 	"github.com/grafeas/kritis/pkg/kritis/pods"
 	"github.com/grafeas/kritis/pkg/kritis/policy"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 )
 
 type Strategy interface {
@@ -50,7 +50,7 @@ func (l *LoggingStrategy) HandleAttestation(image string, pod *v1.Pod, isAtteste
 	if isAttested {
 		glog.Infof("Image %s has one or more valid attestation(s)", image)
 	} else {
-		glog.Infof("No Valid Attestations Found for image %s. Proceeding with next checks", image)
+		glog.Infof("No valid attestations found for image %s. Proceeding with next checks", image)
 	}
 	return nil
 }

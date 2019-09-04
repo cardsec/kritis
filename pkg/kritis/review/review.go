@@ -17,11 +17,11 @@ limitations under the License.
 package review
 
 import (
+	"encoding/base64"
 	"fmt"
 
 	"github.com/golang/glog"
 	"github.com/grafeas/kritis/pkg/kritis/apis/kritis/v1beta1"
-	"github.com/grafeas/kritis/pkg/kritis/attestation"
 	"github.com/grafeas/kritis/pkg/kritis/container"
 	"github.com/grafeas/kritis/pkg/kritis/crd/authority"
 	"github.com/grafeas/kritis/pkg/kritis/crd/securitypolicy"
@@ -42,7 +42,7 @@ type Reviewer struct {
 type Config struct {
 	Validate  securitypolicy.ValidateFunc
 	Secret    secrets.Fetcher
-	Auths     authority.Lister
+	Auths     authority.Fetcher
 	Strategy  violation.Strategy
 	IsWebhook bool
 }
@@ -54,12 +54,49 @@ func New(client metadata.Fetcher, c *Config) Reviewer {
 	}
 }
 
-// Review reviews a set of images against a set of policies
-// Returns error if violations are found and handles them as per violation strategy
-func (r Reviewer) Review(images []string, isps []v1beta1.ImageSecurityPolicy, pod *v1.Pod) error {
-	images = util.RemoveGloballyWhitelistedImages(images)
+// ReviewGAP reviews images against generic attestation policies
+// Returns error if violations are found and handles them per violation strategy
+func (r Reviewer) ReviewGAP(images []string, gaps []v1beta1.GenericAttestationPolicy, pod *v1.Pod) error {
+	images = util.RemoveGloballyAllowedImages(images)
 	if len(images) == 0 {
-		glog.Infof("images are all globally whitelisted, returning successful status: %s", images)
+		glog.Infof("images are all globally allowed, returning successful status: %s", images)
+		return nil
+	}
+
+	if len(gaps) == 0 {
+		glog.Info("No Generic Attestation Policies found")
+		return nil
+	}
+
+	for _, image := range images {
+		glog.Infof("Check if %s has valid Attestations.", image)
+		imgAttested := false
+		for _, gap := range gaps {
+			glog.Infof("Validating against GenericAttestationPolicy %s", gap.Name)
+			// Get all AttestationAuthorities in this policy.
+			auths, err := r.getAttestationAuthoritiesForGAP(gap)
+			if err != nil {
+				return err
+			}
+			isAuthAttested, _ := r.fetchAndVerifyAttestations(image, auths, pod)
+			if isAuthAttested {
+				imgAttested = true
+				break
+			}
+		}
+		if !imgAttested {
+			return fmt.Errorf("image %s is not attested", image)
+		}
+	}
+	return nil
+}
+
+// ReviewISP reviews images against image security policies
+// Returns error if violations are found and handles them per violation strategy
+func (r Reviewer) ReviewISP(images []string, isps []v1beta1.ImageSecurityPolicy, pod *v1.Pod) error {
+	images = util.RemoveGloballyAllowedImages(images)
+	if len(images) == 0 {
+		glog.Infof("images are all globally allowed, returning successful status: %s", images)
 		return nil
 	}
 	if len(isps) == 0 {
@@ -68,12 +105,13 @@ func (r Reviewer) Review(images []string, isps []v1beta1.ImageSecurityPolicy, po
 
 	for _, isp := range isps {
 		glog.Infof("Validating against ImageSecurityPolicy %s", isp.Name)
-		auths, err := r.config.Auths(isp.Namespace)
+		// Get all AttestationAuthorities in this policy.
+		auths, err := r.getAttestationAuthoritiesForISP(isp)
 		if err != nil {
-			return fmt.Errorf("Error getting attestors: %v", err)
+			return err
 		}
 		for _, image := range images {
-			glog.Infof("Check if %s as valid Attestations.", image)
+			glog.Infof("Check if %s has valid Attestations.", image)
 			isAttested, attestations := r.fetchAndVerifyAttestations(image, auths, pod)
 			// Skip vulnerability check for Webhook if attestations found.
 			if isAttested && r.config.IsWebhook {
@@ -89,7 +127,7 @@ func (r Reviewer) Review(images []string, isps []v1beta1.ImageSecurityPolicy, po
 				return r.handleViolations(image, pod, violations)
 			}
 			if r.config.IsWebhook {
-				if err := r.addAttestations(image, attestations, isp.Namespace); err != nil {
+				if err := r.addAttestations(image, attestations, isp); err != nil {
 					glog.Errorf("error adding attestations %s", err)
 				}
 			}
@@ -126,12 +164,12 @@ Please see instructions `, image)
 	}
 	keys := map[string]string{}
 	for _, auth := range auths {
-		s, err := attestation.NewPgpKey("", auth.Spec.PublicKeyData)
+		key, fingerprint, err := fingerprint(auth.Spec.PublicKeyData)
 		if err != nil {
 			glog.Errorf("Error parsing key for %q: %v", auth.Name, err)
 			continue
 		}
-		keys[s.Fingerprint()] = auth.Spec.PublicKeyData
+		keys[fingerprint] = key
 	}
 	for _, a := range attestations {
 		if err = host.VerifyAttestationSignature(keys[a.KeyID], a.Signature); err != nil {
@@ -159,23 +197,23 @@ func (r Reviewer) handleViolations(image string, pod *v1.Pod, violations []polic
 	return fmt.Errorf(errMsg)
 }
 
-func (r Reviewer) addAttestations(image string, atts []metadata.PGPAttestation, ns string) error {
-	// Get all AttestationAuthorities in this namespace.
-	auths, err := r.config.Auths(ns)
+func (r Reviewer) addAttestations(image string, atts []metadata.PGPAttestation, isp v1beta1.ImageSecurityPolicy) error {
+	// Get all AttestationAuthorities in this policy.
+	auths, err := r.getAttestationAuthoritiesForISP(isp)
 	if err != nil {
 		return err
 	}
 	if len(auths) == 0 {
-		return fmt.Errorf("no attestation authorities configured for namespace %s", ns)
+		return fmt.Errorf("no attestation authorities configured for security policy %s", isp.Name)
 	}
 	keys := map[string]string{}
 	for _, auth := range auths {
-		s, err := attestation.NewPgpKey("", auth.Spec.PublicKeyData)
+		_, fingerprint, err := fingerprint(auth.Spec.PublicKeyData)
 		if err != nil {
 			glog.Errorf("Error parsing key for %q: %v", auth.Name, err)
 			continue
 		}
-		keys[auth.Name] = s.Fingerprint()
+		keys[auth.Name] = fingerprint
 	}
 	// Get all AttestationAuthorities which have not attested the image.
 	errMsgs := []string{}
@@ -191,7 +229,7 @@ func (r Reviewer) addAttestations(image string, atts []metadata.PGPAttestation, 
 			errMsgs = append(errMsgs, err.Error())
 		}
 		// Get secret for this Authority
-		s, err := r.config.Secret(ns, a.Spec.PrivateKeySecretName)
+		s, err := r.config.Secret(isp.Namespace, a.Spec.PrivateKeySecretName)
 		if err != nil {
 			errMsgs = append(errMsgs, err.Error())
 		}
@@ -221,4 +259,41 @@ func getUnAttested(auths []v1beta1.AttestationAuthority, keys map[string]string,
 		}
 	}
 	return l
+}
+
+// fingerprint returns the fingerprint and key from the base64 encoded public key data
+func fingerprint(publicKeyData string) (key, fingerprint string, err error) {
+	publicData, err := base64.StdEncoding.DecodeString(publicKeyData)
+	if err != nil {
+		return key, fingerprint, err
+	}
+	s, err := secrets.NewPgpKey("", "", string(publicData))
+	if err != nil {
+		return key, fingerprint, err
+	}
+	return string(publicData), s.Fingerprint(), nil
+}
+
+func (r Reviewer) getAttestationAuthoritiesForISP(isp v1beta1.ImageSecurityPolicy) ([]v1beta1.AttestationAuthority, error) {
+	auths := make([]v1beta1.AttestationAuthority, len(isp.Spec.AttestationAuthorityNames))
+	for i, aName := range isp.Spec.AttestationAuthorityNames {
+		a, err := r.config.Auths(isp.Namespace, aName)
+		if err != nil {
+			return nil, fmt.Errorf("Error getting attestors: %v", err)
+		}
+		auths[i] = *a
+	}
+	return auths, nil
+}
+
+func (r Reviewer) getAttestationAuthoritiesForGAP(gap v1beta1.GenericAttestationPolicy) ([]v1beta1.AttestationAuthority, error) {
+	auths := make([]v1beta1.AttestationAuthority, len(gap.Spec.AttestationAuthorityNames))
+	for i, aName := range gap.Spec.AttestationAuthorityNames {
+		a, err := r.config.Auths(gap.Namespace, aName)
+		if err != nil {
+			return nil, fmt.Errorf("Error getting attestors: %v", err)
+		}
+		auths[i] = *a
+	}
+	return auths, nil
 }
